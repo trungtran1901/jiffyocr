@@ -1,0 +1,18 @@
+services:
+  oneocr-api-onnx:
+    build:
+      context: .
+      dockerfile: Dockerfile.onnx
+    image: oneocr-api:onnx
+    container_name: oneocr-api-onnx
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount thu muc chua cac file .onnx da giai ma + charset.txt tu host
+      - ./onnx_models:/app/onnx_models:ro
+    environment:
+      - OCR_BACKEND=onnx
+      - ONNX_MODELS_DIR=/app/onnx_models
+      - TEXT_CONFIDENCE_THRESHOLD=0.8
+      - NMS_IOU_THRESHOLD=0.3
+    restart: unless-stopped

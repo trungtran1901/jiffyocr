@@ -1,0 +1,8 @@
+Copy 3 file sau vao thu muc nay truoc khi chay docker-compose up:
+  - oneocr.dll
+  - oneocr.onemodel
+  - onnxruntime.dll
+
+Lay tu may Windows 11, thu muc kieu:
+  C:\Program Files\WindowsApps\Microsoft.ScreenSketch_...\SnippingTool.Vision.Interop\
+(hoac duong dan tuong tu chua SnippingTool.Vision.Interop ma ban da tim thay)

@@ -1,0 +1,10 @@
+Copy vao day (tu ban tu giai ma):
+  - detection.onnx      (doi ten cho khop, hoac sua app/engine/onnx_pipeline/config.py)
+  - recognition.onnx
+  - charset.txt         (danh sach ky tu, moi dong 1 ky tu, dung thu tu index cua model)
+
+Truoc khi chay, doi chieu input/output shape that cua model (dung netron.app)
+va sua lai:
+  - app/engine/onnx_pipeline/config.py       (kich thuoc input, ten file)
+  - app/engine/onnx_pipeline/pipeline.py     (ham parse_detection_output)
+  - app/engine/onnx_pipeline/preprocessing.py (mean/std normalize)

@@ -1,0 +1,21 @@
+# Dockerfile danh cho OCR_BACKEND=onnx - KHONG can Wine, nhe va nhanh hon
+# hang han so voi Dockerfile goc (ban Wine). Dung file nay bang:
+#   docker build -f Dockerfile.onnx -t oneocr-api:onnx .
+
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY app ./app
+
+ENV OCR_BACKEND=onnx \
+    ONNX_MODELS_DIR=/app/onnx_models
+
+RUN mkdir -p /app/onnx_models /tmp/oneocr_jobs
+
+EXPOSE 8000
+
+CMD ["python3", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

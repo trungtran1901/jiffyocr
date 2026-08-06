@@ -1,0 +1,13 @@
+services:
+  oneocr-api:
+    build: .
+    image: oneocr-api:latest
+    container_name: oneocr-api
+    ports:
+      - "8000:8000"
+    environment:
+      - OCR_DATA_DIR=/app/ocr_data
+      - OCR_WORKER_TIMEOUT=60
+      - OCR_MAX_PDF_PAGES=500
+      - OCR_PDF_DPI=220
+    restart: unless-stopped
