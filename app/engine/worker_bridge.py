@@ -1,5 +1,8 @@
+import asyncio
 import json
+import os
 import subprocess
+import threading
 import uuid
 from pathlib import Path
 
@@ -18,12 +21,14 @@ class OcrWorkerError(RuntimeError):
 
 
 def _to_wine_path(linux_path: Path) -> str:
-    """Chuyển /home/... thành Z:\\home\\... (mapping ổ Z: mặc định của Wine)."""
     return "Z:" + str(linux_path).replace("/", "\\")
 
 
+def _wine_env() -> dict:
+    return os.environ.copy()
+
+
 def run_ocr_on_image(image_path: Path) -> dict:
-    """Gọi worker chạy dưới wine, trả về dict kết quả OCR cho 1 ảnh."""
     if not OCR_DATA_DIR.exists():
         raise OcrWorkerError(
             f"Thieu thu muc OCR_DATA_DIR ({OCR_DATA_DIR}). "
@@ -44,11 +49,11 @@ def run_ocr_on_image(image_path: Path) -> dict:
             capture_output=True,
             text=True,
             timeout=WORKER_TIMEOUT_SEC,
+            env=_wine_env(),
         )
     except subprocess.TimeoutExpired as exc:
         raise OcrWorkerError(f"Worker qua thoi gian cho phep ({WORKER_TIMEOUT_SEC}s)") from exc
 
-    # stdout có thể lẫn log của wine ở stderr; chỉ parse dòng JSON cuối cùng của stdout
     stdout_lines = [line for line in proc.stdout.strip().splitlines() if line.strip()]
     if not stdout_lines:
         raise OcrWorkerError(
@@ -74,16 +79,10 @@ def new_job_dir() -> Path:
     return job_dir
 
 
-def run_ocr_dispatch(image_path: Path) -> dict:
-    """Chọn backend theo OCR_BACKEND (native | wine | onnx).
+_native_engine_lock = threading.Lock()
 
-    - native: chạy trên Windows native (không cần Wine) - gọi oneocr.dll
-      thẳng trong process Python hiện tại bằng ctypes.WinDLL. Dùng khi bạn
-      chạy uvicorn trực tiếp trên Windows (venv thường), không qua Docker.
-    - wine:   dùng khi FastAPI chạy trong container Linux, gọi oneocr.dll
-      qua subprocess Wine (xem run_ocr_on_image ở trên).
-    - onnx:   pipeline ONNX thuần, không cần DLL/Wine.
-    """
+
+def run_ocr_dispatch(image_path: Path) -> dict:
     from app.config import OCR_BACKEND
 
     if OCR_BACKEND == "onnx":
@@ -96,12 +95,14 @@ def run_ocr_dispatch(image_path: Path) -> dict:
     return run_ocr_on_image(image_path)
 
 
+async def run_ocr_dispatch_async(image_path: Path) -> dict:
+    return await asyncio.to_thread(run_ocr_dispatch, image_path)
+
+
 _native_engine = None
 
 
 def run_ocr_native(image_path: Path) -> dict:
-    """Chạy oneocr.dll trực tiếp trong process Python hiện tại (chỉ hoạt
-    động khi Python đang chạy trên Windows thật, vì cần ctypes.WinDLL)."""
     global _native_engine
 
     import sys
@@ -118,17 +119,18 @@ def run_ocr_native(image_path: Path) -> dict:
         )
 
     if _native_engine is None:
-        # import cham (chi tren Windows) vi module dung ctypes.WinDLL,
-        # se loi ngay khi import tren Linux
-        sys.path.insert(0, str(WORKER_SCRIPT.parent))
-        from ocr_worker import OneOcrEngine  # type: ignore
+        with _native_engine_lock:
+            if _native_engine is None:
+                sys.path.insert(0, str(WORKER_SCRIPT.parent))
+                from ocr_worker import OneOcrEngine  # type: ignore
 
+                try:
+                    _native_engine = OneOcrEngine(str(OCR_DATA_DIR))
+                except Exception as exc:
+                    raise OcrWorkerError(f"Khoi tao OneOcrEngine that bai: {exc}") from exc
+
+    with _native_engine_lock:
         try:
-            _native_engine = OneOcrEngine(str(OCR_DATA_DIR))
-        except Exception as exc:  # noqa: BLE001
-            raise OcrWorkerError(f"Khoi tao OneOcrEngine that bai: {exc}") from exc
-
-    try:
-        return _native_engine.run(str(image_path))
-    except Exception as exc:  # noqa: BLE001
-        raise OcrWorkerError(f"OCR that bai: {exc}") from exc
+            return _native_engine.run(str(image_path))
+        except Exception as exc:
+            raise OcrWorkerError(f"OCR that bai: {exc}") from exc

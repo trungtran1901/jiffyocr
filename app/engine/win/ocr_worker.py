@@ -1,16 +1,3 @@
-"""
-Chay bang Windows Python (qua Wine). Nhan duong dan anh qua argv, tra JSON
-qua stdout.
-
-Cach dung:
-    wine python.exe ocr_worker.py <ocr_data_dir> <image_path>
-
-Ten ham export va thu tu tham so duoi day lay theo du lieu cong khai da
-duoc cong dong reverse engineer va xac nhan hoat dong (repo AuroraWright/
-oneocr), khac voi phien ban doan truoc do cua toi - phien ban nay chinh xac
-hon nhieu.
-"""
-
 import ctypes
 import json
 import os
@@ -27,8 +14,6 @@ from ctypes import (
     c_ubyte,
 )
 
-# Key giai ma model - da bi cong dong trich xuat va cong khai, ban than
-# oneocr.dll tu dung key nay de giai ma noi bo khi CreateOcrPipeline duoc goi.
 MODEL_KEY = b"kj)TGtrK>f]b[Piow.gU+nC@s\"\"\"\"\"\"4"
 
 c_int64_p = POINTER(c_int64)
@@ -38,11 +23,11 @@ c_ubyte_p = POINTER(c_ubyte)
 
 class OcrImage(Structure):
     _fields_ = [
-        ("type", c_int32),        # 3 = BGRA
+        ("type", c_int32),
         ("width", c_int32),
         ("height", c_int32),
         ("_reserved", c_int32),
-        ("step_size", c_int64),   # so byte moi hang = width * 4 (BGRA)
+        ("step_size", c_int64),
         ("data_ptr", c_ubyte_p),
     ]
 
@@ -58,7 +43,6 @@ class OcrBoundingBox(Structure):
 
 OcrBoundingBox_p = POINTER(OcrBoundingBox)
 
-# (ten_ham, argtypes, restype)
 DLL_FUNCTIONS = [
     ("CreateOcrInitOptions", [c_int64_p], c_int64),
     ("OcrInitOptionsSetUseModelDelayLoad", [c_int64, c_char], c_int64),
@@ -95,19 +79,36 @@ def bgra_bytes_from_image_path(image_path):
 
 class OneOcrEngine:
     def __init__(self, ocr_data_dir):
-        self.ocr_data_dir = ocr_data_dir
-        self.dll_path = os.path.join(ocr_data_dir, "oneocr.dll")
-        self.model_path = os.path.join(ocr_data_dir, "oneocr.onemodel")
+        self.ocr_data_dir = os.path.abspath(ocr_data_dir)
+        self.dll_path = os.path.join(self.ocr_data_dir, "oneocr.dll")
+        self.model_path = os.path.join(self.ocr_data_dir, "oneocr.onemodel")
+        self.onnxruntime_path = os.path.join(self.ocr_data_dir, "onnxruntime.dll")
 
         if not os.path.exists(self.dll_path):
             raise FileNotFoundError(f"Khong thay oneocr.dll tai {self.dll_path}")
         if not os.path.exists(self.model_path):
             raise FileNotFoundError(f"Khong thay oneocr.onemodel tai {self.model_path}")
+        if not os.path.exists(self.onnxruntime_path):
+            raise FileNotFoundError(f"Khong thay onnxruntime.dll tai {self.onnxruntime_path}")
 
-        # onnxruntime.dll phai load duoc tu cung thu muc
-        os.environ["PATH"] = ocr_data_dir + os.pathsep + os.environ.get("PATH", "")
+        os.environ["PATH"] = self.ocr_data_dir + os.pathsep + os.environ.get("PATH", "")
 
-        self.dll = ctypes.WinDLL(self.dll_path)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.SetDllDirectoryW.argtypes = [ctypes.c_wchar_p]
+        kernel32.SetDllDirectoryW.restype = ctypes.c_int
+        if not kernel32.SetDllDirectoryW(self.ocr_data_dir):
+            raise RuntimeError(f"SetDllDirectoryW that bai, ma loi {ctypes.get_last_error()}")
+
+        try:
+            self._ort_dll = ctypes.WinDLL(self.onnxruntime_path)
+        except OSError as exc:
+            raise RuntimeError(f"Khong load duoc onnxruntime.dll: {exc}") from exc
+
+        try:
+            self.dll = ctypes.WinDLL(self.dll_path)
+        except OSError as exc:
+            raise RuntimeError(f"Khong load duoc oneocr.dll: {exc}") from exc
+
         self._bind_functions()
 
         self.init_options = c_int64()
@@ -238,7 +239,7 @@ def main():
         engine = OneOcrEngine(ocr_data_dir)
         result = engine.run(image_path)
         print(json.dumps({"ok": True, "result": result}, ensure_ascii=False))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
         sys.exit(1)
 

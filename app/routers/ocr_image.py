@@ -2,7 +2,7 @@ import shutil
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 
-from app.engine.worker_bridge import OcrWorkerError, new_job_dir, run_ocr_dispatch
+from app.engine.worker_bridge import OcrWorkerError, new_job_dir, run_ocr_dispatch_async
 from app.models.schemas import Box, OcrImageResponse
 from app.utils.bbox import VALID_FORMATS, convert_bbox
 
@@ -30,7 +30,7 @@ async def ocr_image(
         with image_path.open("wb") as f:
             shutil.copyfileobj(file.file, f)
 
-        raw_result = run_ocr_dispatch(image_path)
+        raw_result = await run_ocr_dispatch_async(image_path)
 
         boxes = [
             Box(

@@ -1,35 +1,18 @@
+import asyncio
 import shutil
 
 import fitz
 import pdf_inspector
-from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 
 from app.config import MAX_PDF_PAGES, PDF_RENDER_DPI
-from app.engine.worker_bridge import OcrWorkerError, new_job_dir, run_ocr_dispatch
+from app.engine.worker_bridge import OcrWorkerError, new_job_dir, run_ocr_dispatch_async
 from app.models.schemas import Box, ImagePageResult, PdfFastResponse
 from app.utils.bbox import VALID_FORMATS, convert_bbox
-# from app.utils.pdf_pages import parse_pages_param
 
 router = APIRouter(prefix="/ocr", tags=["OCR"])
 
-TRUE_VALUES = {"1", "true", "yes", "on"}
-
-
-def _resolve_bool(query_val, form_val, default=False):
-    for val in (query_val, form_val):
-        if val is None:
-            continue
-        if isinstance(val, bool):
-            return val
-        return str(val).strip().lower() in TRUE_VALUES
-    return default
-
-
-def _resolve_str(query_val, form_val, default):
-    for val in (query_val, form_val):
-        if val:
-            return val
-    return default
+PAGE_CONCURRENCY = 4
 
 
 def _group_text_items_by_page(items, page_count):
@@ -60,20 +43,53 @@ def _text_items_to_boxes(items, bbox_format):
     return boxes
 
 
+async def _process_page(job_dir, page, i, needs_ocr, text_items_by_page, bbox_format, getContent, matrix, semaphore):
+    if not needs_ocr:
+        items = text_items_by_page.get(i, [])
+        native_text = await asyncio.to_thread(page.get_text)
+        boxes = _text_items_to_boxes(items, bbox_format) if items else []
+        content = native_text if getContent else None
+        return ImagePageResult(page_index=i, source="text", boxes=boxes, content=content)
+
+    async with semaphore:
+        try:
+            pix = await asyncio.to_thread(page.get_pixmap, matrix=matrix, colorspace=fitz.csRGB)
+            img_path = job_dir / f"page_{i}.png"
+            await asyncio.to_thread(pix.save, img_path)
+
+            raw_result = await run_ocr_dispatch_async(img_path)
+            img_path.unlink(missing_ok=True)
+
+            boxes = [
+                Box(
+                    text=line["text"],
+                    score=line.get("confidence", 0.0),
+                    bbox=convert_bbox(line.get("bbox"), bbox_format),
+                )
+                for line in raw_result.get("lines", [])
+            ]
+
+            return ImagePageResult(
+                page_index=i,
+                source="ocr",
+                boxes=boxes,
+                content=raw_result.get("text", "") if getContent else None,
+            )
+        except (OcrWorkerError, RuntimeError) as exc:
+            return ImagePageResult(
+                page_index=i,
+                source="ocr_error",
+                boxes=[],
+                content=f"[loi trang {i}]: {exc}" if getContent else None,
+            )
+
+
 @router.post("/pdf-fast", response_model=PdfFastResponse)
 async def ocr_pdf_fast(
     file: UploadFile = File(...),
-    bbox_format_q: str = Query(None, alias="bbox_format"),
-    bbox_format_f: str = Form(None, alias="bbox_format"),
-    getContent_q: str = Query(None, alias="getContent"),
-    getContent_f: str = Form(None, alias="getContent"),
-    pages_q: str = Query(None, alias="pages"),
-    pages_f: str = Form(None, alias="pages"),
+    bbox_format: str = Query("xyxy"),
+    getContent: bool = Query(False),
 ):
-    bbox_format = _resolve_str(bbox_format_q, bbox_format_f, "xyxy")
-    getContent = _resolve_bool(getContent_q, getContent_f, False)
-    pages = _resolve_str(pages_q, pages_f, None)
-
     if bbox_format not in VALID_FORMATS:
         raise HTTPException(400, f"bbox_format khong hop le: {bbox_format}. Cho phep: {sorted(VALID_FORMATS)}")
 
@@ -86,94 +102,38 @@ async def ocr_pdf_fast(
         with pdf_path.open("wb") as f:
             shutil.copyfileobj(file.file, f)
 
-        inspect_result = pdf_inspector.process_pdf(str(pdf_path))
+        inspect_result = await asyncio.to_thread(pdf_inspector.process_pdf, str(pdf_path))
         pages_needing_ocr_1idx = set(getattr(inspect_result, "pages_needing_ocr", []) or [])
 
         doc = fitz.open(pdf_path)
         if doc.page_count > MAX_PDF_PAGES:
             raise HTTPException(400, f"PDF co {doc.page_count} trang, vuot gioi han {MAX_PDF_PAGES} trang/lan.")
 
-        # selected_pages = parse_pages_param(pages, doc.page_count)
-
         text_items_by_page = {}
         if hasattr(pdf_inspector, "extract_text_with_positions"):
-            all_items = pdf_inspector.extract_text_with_positions(str(pdf_path))
+            all_items = await asyncio.to_thread(pdf_inspector.extract_text_with_positions, str(pdf_path))
             text_items_by_page = _group_text_items_by_page(all_items, doc.page_count)
 
         zoom = PDF_RENDER_DPI / 72
         matrix = fitz.Matrix(zoom, zoom)
+        semaphore = asyncio.Semaphore(PAGE_CONCURRENCY)
 
-        result_pages = []
-        for i, page in enumerate(doc):
-            # if i not in selected_pages:
-            #     continue
-
-            page_number_1indexed = i + 1
-            needs_ocr = page_number_1indexed in pages_needing_ocr_1idx
-
-            if not needs_ocr:
-                items = text_items_by_page.get(i, [])
-                native_text = page.get_text()
-
-                if items:
-                    boxes = _text_items_to_boxes(items, bbox_format)
-                else:
-                    boxes = []
-
-                content = native_text if getContent else None
-
-                result_pages.append(
-                    ImagePageResult(
-                        page_index=i,
-                        source="text",
-                        boxes=boxes,
-                        content=content,
-                    )
-                )
-                continue
-
-            try:
-                pix = page.get_pixmap(matrix=matrix, colorspace=fitz.csRGB)
-                img_path = job_dir / f"page_{i}.png"
-                pix.save(img_path)
-                pix = None
-
-                raw_result = run_ocr_dispatch(img_path)
-                img_path.unlink(missing_ok=True)
-
-                boxes = [
-                    Box(
-                        text=line["text"],
-                        score=line.get("confidence", 0.0),
-                        bbox=convert_bbox(line.get("bbox"), bbox_format),
-                    )
-                    for line in raw_result.get("lines", [])
-                ]
-
-                result_pages.append(
-                    ImagePageResult(
-                        page_index=i,
-                        source="ocr",
-                        boxes=boxes,
-                        content=raw_result.get("text", "") if getContent else None,
-                    )
-                )
-            except (OcrWorkerError, RuntimeError) as exc:
-                result_pages.append(
-                    ImagePageResult(
-                        page_index=i,
-                        source="ocr_error",
-                        boxes=[],
-                        content=f"[loi trang {i}]: {exc}" if getContent else None,
-                    )
-                )
+        tasks = [
+            _process_page(
+                job_dir, page, i,
+                (i + 1) in pages_needing_ocr_1idx,
+                text_items_by_page, bbox_format, getContent, matrix, semaphore,
+            )
+            for i, page in enumerate(doc)
+        ]
+        result_pages = await asyncio.gather(*tasks)
 
         return PdfFastResponse(
             filename=file.filename,
             bbox_format=bbox_format,
             pdf_type=str(getattr(inspect_result, "pdf_type", "unknown")),
             page_count=doc.page_count,
-            pages=result_pages,
+            pages=list(result_pages),
         )
     except (OcrWorkerError, FileNotFoundError, RuntimeError) as exc:
         raise HTTPException(500, str(exc)) from exc
