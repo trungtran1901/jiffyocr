@@ -62,13 +62,15 @@ async def ocr_pdf(
 
     job_dir = new_job_dir()
     pdf_path = job_dir / "input.pdf"
+    doc = None
     try:
         with pdf_path.open("wb") as f:
             shutil.copyfileobj(file.file, f)
 
         doc = fitz.open(pdf_path)
-        if doc.page_count > MAX_PDF_PAGES:
-            raise HTTPException(400, f"PDF co {doc.page_count} trang, vuot gioi han {MAX_PDF_PAGES} trang/lan.")
+        page_count = doc.page_count
+        if page_count > MAX_PDF_PAGES:
+            raise HTTPException(400, f"PDF co {page_count} trang, vuot gioi han {MAX_PDF_PAGES} trang/lan.")
 
         zoom = PDF_RENDER_DPI / 72
         matrix = fitz.Matrix(zoom, zoom)
@@ -83,10 +85,12 @@ async def ocr_pdf(
         return OcrPdfResponse(
             filename=file.filename,
             bbox_format=bbox_format,
-            page_count=doc.page_count,
+            page_count=page_count,
             pages=list(result_pages),
         )
     except (OcrWorkerError, FileNotFoundError, RuntimeError) as exc:
         raise HTTPException(500, str(exc)) from exc
     finally:
+        if doc is not None:
+            doc.close()
         shutil.rmtree(job_dir, ignore_errors=True)

@@ -35,6 +35,7 @@ class PdfFastResponse(BaseModel):
     pdf_type: str
     page_count: int
     pages: List[ImagePageResult] = Field(default_factory=list)
+    content: Optional[str] = None
 
 
 class PageLayoutInfo(BaseModel):
